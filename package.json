@@ -10,12 +10,17 @@
   },
   "keywords": [
     "signalk-node-server-plugin",
-    "signalk",
+    "signalk-webapp",
+    "signalk-category-utility",
     "kip",
     "qxs",
     "remote",
     "evdev"
   ],
+  "signalk": {
+    "appIcon": "./assets/icons/icon-72x72.png",
+    "displayName": "Freeboard-SK"
+  },
   "author": "Raffaele Montella",
   "license": "Apache-2.0",
   "dependencies": {
