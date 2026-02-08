@@ -30,6 +30,14 @@ let state = null;
 let keys = null;
 // Track which display is currently focused in the UI.
 let activeDisplayId = null;
+// Track the active Signal K WebSocket connection.
+let skSocket = null;
+// Track the reconnect timer for Signal K streaming.
+let skReconnectTimer = null;
+// Cache the last selected display id from Signal K updates.
+let lastSelectedDisplayId = null;
+// Cache the last selected screen index from Signal K updates.
+let lastSelectedScreenIndex = null;
 
 // Build an API URL for a relative path.
 function pluginUrl(p) {
@@ -129,6 +137,32 @@ function normalizeScreenIndex(payload) {
   return null;
 }
 
+// Ensure the keys payload has the expected shape.
+function ensureKeysState() {
+  // Initialize the keys container when missing.
+  if (!keys) keys = {};
+  // Initialize the last-key container when missing.
+  if (!keys.last) keys.last = {};
+}
+
+// Update the last-key UI labels from the keys payload.
+function updateLastKeyUi() {
+  // Show the last key value.
+  elLastKey.textContent = keys?.last?.lastKey || "—";
+  // Show the last key timestamp.
+  elLastKeyAt.textContent = keys?.last?.lastKeyAt || "—";
+  // Show the last key code.
+  elLastKeyCode.textContent = (keys?.last?.lastKeyCode ?? "—");
+}
+
+// Show an API error in the last-key status area.
+function showApiError(message) {
+  // Mark the last-key label as an error.
+  elLastKey.textContent = "Error";
+  // Provide context for troubleshooting.
+  elLastKeyAt.textContent = message;
+}
+
 // Render the on-screen keypad from the keys payload.
 function renderKeypad() {
   // Clear any previous keypad content.
@@ -183,7 +217,7 @@ function renderDisplays() {
       // Update the active display id.
       activeDisplayId = d.id;
       // Refresh data to reflect the new selection.
-      refresh();
+      refreshKipData();
     };
     // Append the item to the display list.
     elDisplayList.appendChild(div);
@@ -239,7 +273,7 @@ function renderDashboards() {
       // Post the screen change for the current display.
       await postKipJson(`displays/${encodeURIComponent(cur.id)}/activeScreen`, { changeId: dash.id });
       // Refresh to reflect the new state.
-      await refresh();
+      await refreshKipData();
     };
 
     // Attach the button to the dashboard container.
@@ -251,22 +285,34 @@ function renderDashboards() {
   });
 }
 
-// Load state and keys, then repaint the UI.
-async function refresh() {
-  // Fetch state and keys concurrently.
-  const [d, k] = await Promise.all([getKipJson("displays"), getPluginJson("api/keys")]);
-
-  // Handle API failures with a helpful message.
-  if (!d.ok || !k.ok) {
-    // Flag the UI as error.
-    elLastKey.textContent = "Error";
-    // Provide status details for troubleshooting.
-    elLastKeyAt.textContent = "Cannot reach plugin/KIP API (kip=" + d.status + ", keys=" + k.status + ")";
+// Load key layout and last-key data from the plugin API.
+async function refreshKeysLayout() {
+  // Request the plugin keys payload.
+  const k = await getPluginJson("api/keys");
+  // Report errors clearly when the plugin API is unavailable.
+  if (!k.ok) {
+    showApiError("Cannot reach plugin API (keys=" + k.status + ")");
     return;
   }
-
-  // Store the latest keys data.
+  // Store the latest keys data for rendering.
   keys = k.data;
+  // Ensure the keys payload has the expected structure.
+  ensureKeysState();
+  // Update the last-key UI from the payload.
+  updateLastKeyUi();
+  // Render the keypad layout.
+  renderKeypad();
+}
+
+// Load KIP display/dashboard data and repaint the UI.
+async function refreshKipData() {
+  // Request the KIP display list.
+  const d = await getKipJson("displays");
+  // Report errors clearly when the KIP API is unavailable.
+  if (!d.ok) {
+    showApiError("Cannot reach KIP API (kip=" + d.status + ")");
+    return;
+  }
 
   // Normalize the KIP display list response.
   const displayList = normalizeDisplayList(d.data);
@@ -295,15 +341,9 @@ async function refresh() {
   // Store the latest KIP display data for rendering.
   state = { displays: displayData.filter(Boolean) };
 
-  // Update last key value.
-  elLastKey.textContent = keys?.last?.lastKey || "—";
-  // Update last key timestamp.
-  elLastKeyAt.textContent = keys?.last?.lastKeyAt || "—";
-  // Update last key code.
-  elLastKeyCode.textContent = (keys?.last?.lastKeyCode ?? "—");
+  // Prefer the selected display id from Signal K if present.
+  if (lastSelectedDisplayId) activeDisplayId = lastSelectedDisplayId;
 
-  // Re-render the keypad.
-  renderKeypad();
   // Re-render the display list.
   renderDisplays();
   // Re-render dashboards for the active display.
@@ -320,7 +360,163 @@ document.getElementById("triggerPlay").onclick = async () => {
   elTriggerResult.textContent = r.ok ? ("OK: " + JSON.stringify(r.data.action)) : ("ERR: " + JSON.stringify(r.data));
 };
 
-// Kick off the first UI refresh.
-refresh();
-// Poll regularly to keep the UI current.
-setInterval(refresh, 1200);
+// Build the Signal K WebSocket stream URL for subscriptions.
+function buildSignalKStreamUrl() {
+  // Choose wss for https and ws for http.
+  const protocol = location.protocol === "https:" ? "wss://" : "ws://";
+  // Point to the Signal K stream endpoint on this host.
+  return protocol + location.host + "/signalk/v1/stream";
+}
+
+// Schedule a reconnect attempt for the Signal K stream.
+function scheduleStreamReconnect() {
+  // Avoid stacking reconnect timers.
+  if (skReconnectTimer) return;
+  // Retry after a short delay to avoid hammering the server.
+  skReconnectTimer = setTimeout(() => {
+    // Clear the timer before reconnecting.
+    skReconnectTimer = null;
+    // Restart the Signal K subscription.
+    startSignalKSubscription();
+  }, 2000);
+}
+
+// Handle a single delta value update.
+function handleDeltaValue(path, value) {
+  // Ignore updates without a path.
+  if (!path) return;
+  // Ensure the keys payload has a target container.
+  ensureKeysState();
+
+  // Update the last key name.
+  if (path === "self.qxs001.lastKey") {
+    // Store the updated key label.
+    keys.last.lastKey = value;
+    // Refresh the last-key UI text.
+    updateLastKeyUi();
+    // Re-render the keypad highlight.
+    renderKeypad();
+    return;
+  }
+
+  // Update the last key timestamp.
+  if (path === "self.qxs001.lastKeyAt") {
+    // Store the updated timestamp.
+    keys.last.lastKeyAt = value;
+    // Refresh the last-key UI text.
+    updateLastKeyUi();
+    return;
+  }
+
+  // Update the last key numeric code.
+  if (path === "self.qxs001.lastKeyCode") {
+    // Store the updated key code.
+    keys.last.lastKeyCode = value;
+    // Refresh the last-key UI text.
+    updateLastKeyUi();
+    return;
+  }
+
+  // Update the selected display id when it changes.
+  if (path === "self.qxs001.kip.selectedDisplayId") {
+    // Normalize the display id value.
+    const nextId = String(value || "").trim();
+    // Ignore empty or unchanged selections.
+    if (!nextId || nextId === lastSelectedDisplayId) return;
+    // Cache the selection and update UI focus.
+    lastSelectedDisplayId = nextId;
+    // Keep the active display aligned with the selected display.
+    activeDisplayId = nextId;
+    // Refresh KIP data to reflect the new selection.
+    refreshKipData();
+    return;
+  }
+
+  // Update the selected screen index when it changes.
+  if (path === "self.qxs001.kip.selectedScreenIndex") {
+    // Normalize the screen index to a number.
+    const nextIndex = Number(value);
+    // Ignore non-numeric updates.
+    if (!Number.isFinite(nextIndex)) return;
+    // Ignore unchanged screen index updates.
+    if (nextIndex === lastSelectedScreenIndex) return;
+    // Cache the new screen index.
+    lastSelectedScreenIndex = nextIndex;
+    // Refresh KIP data to show the newly selected dashboard.
+    refreshKipData();
+  }
+}
+
+// Handle Signal K delta messages from the stream.
+function handleDeltaMessage(payload) {
+  // Ignore payloads without updates.
+  if (!payload || !Array.isArray(payload.updates)) return;
+  // Iterate through updates in the delta message.
+  payload.updates.forEach((update) => {
+    // Iterate through the updated values.
+    (update.values || []).forEach((entry) => {
+      // Apply each delta value update.
+      handleDeltaValue(entry?.path, entry?.value);
+    });
+  });
+}
+
+// Start the Signal K WebSocket subscription.
+function startSignalKSubscription() {
+  // Close any existing socket to avoid duplicate streams.
+  if (skSocket) skSocket.close();
+  // Build the stream URL for this host.
+  const url = buildSignalKStreamUrl();
+  // Create a new WebSocket connection.
+  const ws = new WebSocket(url);
+  // Track the socket so it can be closed or reused later.
+  skSocket = ws;
+
+  // Send the subscription request when the socket opens.
+  ws.onopen = () => {
+    // Build the subscription message for qxs001 paths.
+    const msg = {
+      context: "vessels.self",
+      subscribe: [{ path: "self.qxs001", period: 0 }]
+    };
+    // Send the subscription message as JSON.
+    ws.send(JSON.stringify(msg));
+  };
+
+  // Parse incoming delta messages.
+  ws.onmessage = (event) => {
+    // Prepare a container for the parsed JSON.
+    let data = null;
+    try {
+      // Attempt to parse the JSON payload.
+      data = JSON.parse(event.data || "{}");
+    } catch (_) {
+      // Skip invalid JSON payloads.
+      return;
+    }
+    // Apply delta updates to the UI.
+    handleDeltaMessage(data);
+  };
+
+  // Reconnect when the stream closes.
+  ws.onclose = () => {
+    // Schedule a reconnect attempt.
+    scheduleStreamReconnect();
+  };
+
+  // Reconnect on errors after closing the socket.
+  ws.onerror = () => {
+    // Close the socket to trigger the reconnect logic.
+    ws.close();
+  };
+}
+
+// Kick off the initial data load and stream subscription.
+(async () => {
+  // Load the initial keys layout and last-key values.
+  await refreshKeysLayout();
+  // Load the initial display and dashboard data.
+  await refreshKipData();
+  // Start the Signal K subscription for live updates.
+  startSignalKSubscription();
+})();

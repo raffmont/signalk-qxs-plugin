@@ -31,6 +31,7 @@ module.exports = function (app) {
   let kipDashboardsByDisplay = {};
   let kipScreenIndexByDisplay = {};
   let selectedDisplayId = null;
+  let lastPublishedScreenIndexByDisplay = {};
 
   let readers = [];
   let screenPollTimer = null;
@@ -57,6 +58,17 @@ module.exports = function (app) {
         },
       ],
     });
+  }
+
+  function publishSelectedScreenIndex() {
+    // Choose the current screen index for the selected display.
+    const screenIndex = selectedDisplayId ? kipScreenIndexByDisplay[selectedDisplayId] ?? 0 : 0;
+    // Read the previously published screen index for this display.
+    const prev = selectedDisplayId ? lastPublishedScreenIndexByDisplay[selectedDisplayId] : null;
+    // Cache the latest screen index for comparison next time.
+    if (selectedDisplayId) lastPublishedScreenIndexByDisplay[selectedDisplayId] = screenIndex;
+    // Publish only when the screen index changes.
+    if (screenIndex !== prev) publishToSignalK([{ path: "self.qxs001.kip.selectedScreenIndex", value: screenIndex }]);
   }
 
   function ensureBindingContainer(displayId) {
@@ -117,40 +129,59 @@ module.exports = function (app) {
   }
 
   async function refreshKipDisplaysAndDashboards() {
+    // Fetch the KIP display list from the local server.
     const displays = await kipGet("/plugins/kip/displays");
+    // Normalize the payload into an array of display objects.
     kipDisplays = normalizeDisplayList(displays);
 
-    if (kipDisplays.length && !selectedDisplayId) selectedDisplayId = kipDisplays[0].displayId;
-    if (kipDisplays.length && selectedDisplayId && !kipDisplays.some((d) => d.displayId === selectedDisplayId)) {
-      selectedDisplayId = kipDisplays[0].displayId;
+    // Default the selected display to the first KIP display id.
+    if (kipDisplays.length && !selectedDisplayId) selectedDisplayId = kipDisplays[0].id;
+    // Ensure the selected display still exists in the latest list.
+    if (kipDisplays.length && selectedDisplayId && !kipDisplays.some((d) => d.id === selectedDisplayId)) {
+      selectedDisplayId = kipDisplays[0].id;
     }
 
+    // Build a lookup of dashboards keyed by display id.
     const newDash = {};
+    // Iterate through each display to fetch its dashboards.
     for (const d of kipDisplays) {
       try {
-        const dashboards = await kipGet(`/plugins/kip/displays/${encodeURIComponent(d.displayId)}`);
-        newDash[d.displayId] = normalizeDashboards(dashboards);
+        // Fetch dashboards for the current display id.
+        const dashboards = await kipGet(`/plugins/kip/displays/${encodeURIComponent(d.id)}`);
+        // Store normalized dashboards for this display id.
+        newDash[d.id] = normalizeDashboards(dashboards);
       } catch (_) {
-        newDash[d.displayId] = [];
+        // Default to an empty dashboard list on errors.
+        newDash[d.id] = [];
       }
     }
+    // Replace the dashboards lookup with the refreshed data.
     kipDashboardsByDisplay = newDash;
   }
 
   async function refreshKipScreenIndexes() {
+    // Iterate through each display to fetch its screen index.
     for (const d of kipDisplays) {
       try {
-        const idx = await kipGet(`/plugins/kip/displays/${encodeURIComponent(d.displayId)}/screenIndex`);
+        // Request the screen index for the current display id.
+        const idx = await kipGet(`/plugins/kip/displays/${encodeURIComponent(d.id)}/screenIndex`);
+        // Normalize the response into a number.
         const normalized = normalizeScreenIndex(idx);
-        kipScreenIndexByDisplay[d.displayId] = Number.isFinite(normalized) ? normalized : 0;
+        // Store a valid screen index or default to zero.
+        kipScreenIndexByDisplay[d.id] = Number.isFinite(normalized) ? normalized : 0;
       } catch (_) {
-        if (kipScreenIndexByDisplay[d.displayId] == null) kipScreenIndexByDisplay[d.displayId] = 0;
+        // Default missing screen index to zero.
+        if (kipScreenIndexByDisplay[d.id] == null) kipScreenIndexByDisplay[d.id] = 0;
       }
     }
+    // Publish screen index updates when they change.
+    publishSelectedScreenIndex();
   }
 
-  async function kipSetActiveScreen(displayId, newIndex) {
-    await kipPost(`/plugins/kip/displays/${encodeURIComponent(displayId)}/activeScreen`, { changeId: newIndex });
+  async function kipSetActiveScreen(displayId, dashboardId) {
+    // Tell KIP to change to the selected dashboard id.
+    await kipPost(`/plugins/kip/displays/${encodeURIComponent(displayId)}/activeScreen`, { changeId: dashboardId });
+    // Refresh screen indexes to reflect the change.
     await refreshKipScreenIndexes();
   }
 
@@ -243,8 +274,8 @@ module.exports = function (app) {
         enum: ["down", "up", "repeat", "any"],
         default: "down",
       },
-      keyVolumeUp: { type: "string", title: "Display Next", default: "KEY_VOLUMEUP" },
-      keyVolumeDown: { type: "string", title: "Display Previous", default: "KEY_VOLUMEDOWN" },
+      keyVolumeUp: { type: "string", title: "Display Previous", default: "KEY_VOLUMEUP" },
+      keyVolumeDown: { type: "string", title: "Display Next", default: "KEY_VOLUMEDOWN" },
       keyNext: { type: "string", title: "Dashboard Next", default: "KEY_NEXTSONG" },
       keyPrev: { type: "string", title: "Dashboard Previous", default: "KEY_PREVIOUSSONG" },
       keyPlay: { type: "string", title: "Play Button", default: "KEY_PLAYPAUSE" },
@@ -256,7 +287,7 @@ module.exports = function (app) {
         items: {
           type: "object",
           properties: {
-            screenId: { type: "string", title: "Screen id (KIP displayId)" },
+            screenId: { type: "string", title: "Screen id (KIP display id)" },
             dashboardId: { type: "string", title: "Dashboard id (KIP dashboard id)" },
 
             actionType: { type: "string", title: "Action type", enum: ["none", "rest", "signalk"], default: "none" },
@@ -299,11 +330,11 @@ module.exports = function (app) {
       } catch (_) {}
 
       const displaysView = kipDisplays.map((d) => {
-        const dashboards = kipDashboardsByDisplay[d.displayId] || [];
-        const screenIndex = kipScreenIndexByDisplay[d.displayId] ?? 0;
+        const dashboards = kipDashboardsByDisplay[d.id] || [];
+        const screenIndex = kipScreenIndexByDisplay[d.id] ?? 0;
         const bindings = {};
-        for (const dash of dashboards) bindings[String(dash.id)] = getPlayAction(d.displayId, dash.id);
-        return { displayId: d.displayId, displayName: d.displayName, screenIndex, dashboards, bindings };
+        for (const dash of dashboards) bindings[String(dash.id)] = getPlayAction(d.id, dash.id);
+        return { displayId: d.id, displayName: d.name || d.id, screenIndex, dashboards, bindings };
       });
 
       res.json({
@@ -319,15 +350,22 @@ module.exports = function (app) {
     });
 
     router.post("/api/kip/activeScreen", express.json(), async (req, res) => {
+      // Read the display id from the request or fall back to the selected one.
       const displayId = String(req.body?.displayId || "").trim() || selectedDisplayId;
-      const changeId = Number(req.body?.changeId);
+      // Read the dashboard id to activate for the display.
+      const changeId = String(req.body?.changeId || "").trim();
+      // Require a valid display id.
       if (!displayId) return res.status(400).json({ error: "Missing displayId" });
-      if (!Number.isFinite(changeId) || changeId < 0) return res.status(400).json({ error: "Missing/invalid changeId" });
+      // Require a valid dashboard id.
+      if (!changeId) return res.status(400).json({ error: "Missing/invalid changeId" });
 
       try {
+        // Ask KIP to activate the dashboard id.
         await kipSetActiveScreen(displayId, changeId);
-        res.json({ ok: true, displayId, screenIndex: kipScreenIndexByDisplay[displayId] ?? changeId });
+        // Return the updated screen index for this display.
+        res.json({ ok: true, displayId, screenIndex: kipScreenIndexByDisplay[displayId] ?? 0 });
       } catch (e) {
+        // Surface KIP errors in a user-friendly payload.
         res.status(500).json({ error: String(e.message || e) });
       }
     });
@@ -392,22 +430,37 @@ module.exports = function (app) {
 
       if (evt.codeName === keyVolumeUp || evt.codeName === keyVolumeDown) {
         if (kipDisplays.length === 0) return;
-        const ids = kipDisplays.map((d) => d.displayId);
+        // Build the list of display ids in the current KIP order.
+        const ids = kipDisplays.map((d) => d.id);
+        // Resolve the current index for the selected display.
         const cur = selectedDisplayId && ids.includes(selectedDisplayId) ? ids.indexOf(selectedDisplayId) : 0;
-        const dir = evt.codeName === keyVolumeUp ? +1 : -1;
+        // Choose the direction based on volume key intent.
+        const dir = evt.codeName === keyVolumeUp ? -1 : +1;
+        // Compute and apply the next selected display id.
         selectedDisplayId = ids[(cur + dir + ids.length) % ids.length];
+        // Publish the new selected display id to Signal K.
         publishToSignalK();
+        // Publish the current screen index for the newly selected display.
+        publishSelectedScreenIndex();
         return;
       }
 
       if (evt.codeName === keyNext || evt.codeName === keyPrev) {
         if (!selectedDisplayId) return;
+        // Load dashboards for the selected display.
         const dashboards = kipDashboardsByDisplay[selectedDisplayId] || [];
         if (dashboards.length === 0) return;
+        // Read the current screen index for this display.
         const curIdx = kipScreenIndexByDisplay[selectedDisplayId] ?? 0;
+        // Choose direction based on next/previous key.
         const dir = evt.codeName === keyNext ? +1 : -1;
+        // Wrap the new index within the dashboards length.
         const newIdx = (curIdx + dir + dashboards.length) % dashboards.length;
-        try { await kipSetActiveScreen(selectedDisplayId, newIdx); } catch (_) {}
+        // Resolve the dashboard id for the new index.
+        const dashboardId = dashboards[newIdx]?.id;
+        if (!dashboardId) return;
+        // Ask KIP to activate the selected dashboard id.
+        try { await kipSetActiveScreen(selectedDisplayId, dashboardId); } catch (_) {}
         return;
       }
 

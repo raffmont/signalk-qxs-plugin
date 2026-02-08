@@ -8,13 +8,20 @@ Cause: the previous build accidentally introduced a stray leading character at t
 This build rewrites all JS files as clean UTF-8 without BOM/stray bytes.
 
 ## Web UI
-The UI pulls key data from the plugin API and display data from the KIP API:
+The UI pulls key data from the plugin API, display data from the KIP API, and listens to Signal K stream updates for QXS-001 document keys:
 
 - `/plugins/signalk-qxs001-plugin/api/keys`
 - `/plugins/kip/displays`
 - `/plugins/kip/displays/<uuid>`
 - `/plugins/kip/displays/<uuid>/screenIndex`
 - `/plugins/kip/displays/<uuid>/activeScreen`
+- Signal K stream `/signalk/v1/stream` (subscription to `self.qxs001.*`)
+
+## Key navigation behavior
+- `KEY_VOLUMEUP`: select the previous display.
+- `KEY_VOLUMEDOWN`: select the next display.
+- `KEY_PREVIOUSSONG`: select the previous dashboard in the current display.
+- `KEY_NEXTSONG`: select the next dashboard in the current display.
 
 ## KIP integration
 Uses:
