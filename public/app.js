@@ -34,6 +34,10 @@ let activeDisplayId = null;
 let skSocket = null;
 // Track the reconnect timer for Signal K streaming.
 let skReconnectTimer = null;
+// Track a pending refresh for KIP data updates.
+let kipRefreshTimer = null;
+// Track a pending refresh for plugin key updates.
+let pluginRefreshTimer = null;
 // Cache the last selected display id from Signal K updates.
 let lastSelectedDisplayId = null;
 // Cache the last selected screen index from Signal K updates.
@@ -381,6 +385,32 @@ function scheduleStreamReconnect() {
   }, 2000);
 }
 
+// Schedule a refresh of KIP data to avoid spamming the API.
+function scheduleKipRefresh() {
+  // Avoid stacking multiple refresh timers.
+  if (kipRefreshTimer) return;
+  // Debounce the refresh so multiple deltas coalesce.
+  kipRefreshTimer = setTimeout(() => {
+    // Clear the timer before executing the refresh.
+    kipRefreshTimer = null;
+    // Refresh KIP data for the UI.
+    refreshKipData();
+  }, 300);
+}
+
+// Schedule a refresh of plugin key data to avoid spamming the API.
+function schedulePluginRefresh() {
+  // Avoid stacking multiple refresh timers.
+  if (pluginRefreshTimer) return;
+  // Debounce the refresh so multiple deltas coalesce.
+  pluginRefreshTimer = setTimeout(() => {
+    // Clear the timer before executing the refresh.
+    pluginRefreshTimer = null;
+    // Refresh the keys layout and last key values.
+    refreshKeysLayout();
+  }, 300);
+}
+
 // Handle a single delta value update.
 function handleDeltaValue(path, value) {
   // Ignore updates without a path.
@@ -445,6 +475,19 @@ function handleDeltaValue(path, value) {
     // Refresh KIP data to show the newly selected dashboard.
     refreshKipData();
   }
+
+  // React to KIP plugin updates by refreshing KIP data.
+  if (path.startsWith("plugins.kip")) {
+    // Schedule a debounced KIP refresh.
+    scheduleKipRefresh();
+    return;
+  }
+
+  // React to qxs001 plugin updates by refreshing key data.
+  if (path.startsWith("plugins.signalk-qxs001-plugin")) {
+    // Schedule a debounced plugin refresh.
+    schedulePluginRefresh();
+  }
 }
 
 // Handle Signal K delta messages from the stream.
@@ -474,13 +517,32 @@ function startSignalKSubscription() {
 
   // Send the subscription request when the socket opens.
   ws.onopen = () => {
-    // Build the subscription message for qxs001 paths.
-    const msg = {
+    // Build the subscription message for vessel-specific qxs001 data.
+    const vesselMsg = {
+      // Scope the subscription to the local vessel.
       context: "vessels.self",
-      subscribe: [{ path: "self.qxs001", period: 0 }]
+      // Subscribe to the qxs001 subtree.
+      subscribe: [
+        // Subscribe to qxs001 document updates.
+        { path: "self.qxs001", period: 0 }
+      ]
     };
-    // Send the subscription message as JSON.
-    ws.send(JSON.stringify(msg));
+    // Build the subscription message for plugin-level data.
+    const pluginMsg = {
+      // Use wildcard context for plugin-level data.
+      context: "*",
+      // Subscribe to plugin data paths that inform the UI.
+      subscribe: [
+        // Subscribe to KIP plugin updates.
+        { path: "plugins.kip", period: 0 },
+        // Subscribe to qxs001 plugin updates.
+        { path: "plugins.signalk-qxs001-plugin", period: 0 }
+      ]
+    };
+    // Send the vessel subscription message as JSON.
+    ws.send(JSON.stringify(vesselMsg));
+    // Send the plugin subscription message as JSON.
+    ws.send(JSON.stringify(pluginMsg));
   };
 
   // Parse incoming delta messages.

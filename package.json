@@ -13,7 +13,7 @@
     "express": "^4.19.2"
   },
   "signalk": {
-    "appIcon": "assets/icons/icon-256x256.png",
+    "appIcon": "icon-256x256.svg",
     "displayName": "QXS-001 BLE Keyboard"
   }
 }

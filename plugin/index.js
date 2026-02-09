@@ -106,11 +106,44 @@ module.exports = function (app) {
     return [];
   }
 
+  function normalizeDisplayItem(item) {
+    // Normalize the incoming display id from multiple possible keys.
+    const id = String(item?.id || item?.displayId || item?.uuid || "").trim();
+    // Skip invalid display entries without an id.
+    if (!id) return null;
+    // Normalize a friendly name or fall back to the id.
+    const name = String(item?.name || item?.title || id);
+    // Return a normalized display object.
+    return { id, name };
+  }
+
+  function normalizeDisplays(payload) {
+    // Normalize the display list payload into an array.
+    const list = normalizeDisplayList(payload);
+    // Map each item through the normalization helper.
+    const normalized = list.map((item) => normalizeDisplayItem(item)).filter(Boolean);
+    // Return the normalized array.
+    return normalized;
+  }
+
   function normalizeDashboards(payload) {
     if (Array.isArray(payload)) return payload;
     if (payload && Array.isArray(payload.dashboards)) return payload.dashboards;
     if (payload && Array.isArray(payload.items)) return payload.items;
     return [];
+  }
+
+  function normalizeDashboardItem(item) {
+    // Normalize the incoming dashboard id from multiple possible keys.
+    const id = String(item?.id || item?.dashboardId || item?.uuid || "").trim();
+    // Skip invalid dashboard entries without an id.
+    if (!id) return null;
+    // Normalize a friendly name or fall back to the id.
+    const name = String(item?.name || item?.title || id);
+    // Preserve the icon if present on the payload.
+    const icon = item?.icon || null;
+    // Return a normalized dashboard object.
+    return { id, name, icon };
   }
 
   function normalizeScreenIndex(payload) {
@@ -132,7 +165,7 @@ module.exports = function (app) {
     // Fetch the KIP display list from the local server.
     const displays = await kipGet("/plugins/kip/displays");
     // Normalize the payload into an array of display objects.
-    kipDisplays = normalizeDisplayList(displays);
+    kipDisplays = normalizeDisplays(displays);
 
     // Default the selected display to the first KIP display id.
     if (kipDisplays.length && !selectedDisplayId) selectedDisplayId = kipDisplays[0].id;
@@ -149,7 +182,7 @@ module.exports = function (app) {
         // Fetch dashboards for the current display id.
         const dashboards = await kipGet(`/plugins/kip/displays/${encodeURIComponent(d.id)}`);
         // Store normalized dashboards for this display id.
-        newDash[d.id] = normalizeDashboards(dashboards);
+        newDash[d.id] = normalizeDashboards(dashboards).map((dash) => normalizeDashboardItem(dash)).filter(Boolean);
       } catch (_) {
         // Default to an empty dashboard list on errors.
         newDash[d.id] = [];
