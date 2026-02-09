@@ -15,7 +15,7 @@ The UI pulls key data from the plugin API, display data from the KIP API, and li
 - `/plugins/kip/displays/<uuid>`
 - `/plugins/kip/displays/<uuid>/screenIndex`
 - `/plugins/kip/displays/<uuid>/activeScreen`
-- Signal K stream `/signalk/v1/stream` (subscription to `self.qxs001.*`)
+- Signal K stream `/signalk/v1/stream` (subscription to `self.qxs001.*`, `plugins.kip.*`, and `plugins.signalk-qxs001-plugin.*`)
 
 ## Key navigation behavior
 - `KEY_VOLUMEUP`: select the previous display.
